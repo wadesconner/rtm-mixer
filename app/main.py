@@ -5,6 +5,10 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 app = FastAPI(title="RTM Mixer API")
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
 
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "rtm_audio_pipeline"
 MIXER = PIPELINE_DIR / "rtm_mixer.py"
