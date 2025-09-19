@@ -59,11 +59,6 @@ def main():
     core_plus_outro = out.with_suffix(".core_plus_outro.mp3")
 
     # STEP 1: Mix intro BG + narration (apply bg volume pre- & post-duck; stop at narration end)
-    # Explanation:
-    #   [bgpre]  : apply initial bg volume
-    #   sidechain: duck bg when narration present
-    #   [bgpost] : apply bg volume again after ducking for stronger final control
-    #   amix     : ends when narration ends (duration=shortest)
     cmd1 = f"""
 ffmpeg -y -i {shlex.quote(str(intro))} -i {shlex.quote(str(narr))} \
 -filter_complex "
