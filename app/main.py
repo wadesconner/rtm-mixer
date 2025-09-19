@@ -5,6 +5,40 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 app = FastAPI(title="RTM Mixer API")
+
+from fastapi import Form
+from fastapi.responses import HTMLResponse
+
+@app.get("/upload", response_class=HTMLResponse)
+def upload_form():
+    return """
+    <html><body style="font-family: system-ui; padding: 24px">
+      <h2>RTM Mixer</h2>
+      <form action="/upload" method="post" enctype="multipart/form-data">
+        <div>Intro (mp3): <input type="file" name="intro" accept="audio/mpeg" required></div>
+        <div>Narration (mp3): <input type="file" name="narr" accept="audio/mpeg" required></div>
+        <div>Outro (mp3): <input type="file" name="outro" accept="audio/mpeg" required></div>
+        <div style="margin-top:12px">
+          <button type="submit">Mix</button>
+        </div>
+      </form>
+      <p style="margin-top:24px"><a href="/generate">Or generate narration from text →</a></p>
+    </body></html>
+    """
+
+@app.post("/upload")
+async def upload_and_mix(
+    intro: UploadFile = File(...),
+    narr: UploadFile = File(...),
+    outro: UploadFile = File(...),
+):
+    # reuse your existing /api/mix logic with defaults
+    return await mix(
+        intro=intro, narr=narr, outro=outro,
+        bg_vol=0.25, duck_threshold=0.02, duck_ratio=12.0,
+        xfade=1.0, lufs=-16.0, tp=-1.5, lra=11.0
+    )
+
 @app.get("/")
 def root():
     return {"status": "ok"}
