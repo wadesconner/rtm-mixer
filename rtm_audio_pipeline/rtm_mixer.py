@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 RTM Mixer - stitches intro background + narration + outro bed into a polished MP3 using ffmpeg.
-- Applies background volume both BEFORE and AFTER ducking for stronger control.
+- Forces all inputs to stereo safely (avoids pan/mono mapping quirks).
+- Applies background volume BEFORE and AFTER ducking for strong control.
 - Ends exactly when narration ends.
 - Crossfades into a short outro bed.
 - Loudness-normalizes the result.
@@ -58,12 +59,15 @@ def main():
     core_mix = out.with_suffix(".core_mix.mp3")
     core_plus_outro = out.with_suffix(".core_plus_outro.mp3")
 
-    # STEP 1: Mix intro BG + narration (apply bg volume pre- & post-duck; stop at narration end)
+    # STEP 1: Mix intro BG + narration
+    # - Force both to stereo & common sample rate (aformat=stereo; aresample=48k)
+    # - Apply bg volume pre- and post-ducking for strong control
+    # - Use duration=shortest to end at narration end
     cmd1 = f"""
 ffmpeg -y -i {shlex.quote(str(intro))} -i {shlex.quote(str(narr))} \
 -filter_complex "
-[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,volume={args.bg_vol}[bgpre];
-[1:a]aresample=48000,pan=stereo|c0=c0|c1=c1[narr];
+[0:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.bg_vol}[bgpre];
+[1:a]aformat=channel_layouts=stereo,aresample=48000[narr];
 [bgpre][narr]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[ducked];
 [ducked]volume={args.bg_vol}[bgpost];
 [bgpost][narr]amix=inputs=2:duration=shortest:dropout_transition=0,
@@ -73,11 +77,14 @@ loudnorm=I={args.lufs}:TP={args.tp}:LRA={args.lra}[mix]
 """.strip()
     run(cmd1)
 
-    # STEP 2: Crossfade into the short outro bed
+    # STEP 2: Crossfade into the short outro bed (also force stereo/48k on outro)
     cmd2 = f"""
 ffmpeg -y -i {shlex.quote(str(core_mix))} -i {shlex.quote(str(outro))} \
--filter_complex "acrossfade=d={args.xfade}:c1=tri:c2=tri" \
--ar 48000 -ac 2 -c:a libmp3lame -b:a 192k {shlex.quote(str(core_plus_outro))}
+-filter_complex "
+[0:a]aformat=channel_layouts=stereo,aresample=48000[core];
+[1:a]aformat=channel_layouts=stereo,aresample=48000[outro];
+[core][outro]acrossfade=d={args.xfade}:c1=tri:c2=tri
+" -ar 48000 -ac 2 -c:a libmp3lame -b:a 192k {shlex.quote(str(core_plus_outro))}
 """.strip()
     run(cmd2)
 
