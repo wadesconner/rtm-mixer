@@ -8,15 +8,16 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse, HTMLResponse
+import httpx
 
 app = FastAPI(title="RTM Mixer API")
 
-# Simple healthcheck for / 
+# Healthcheck
 @app.get("/")
 def root():
     return {"status": "ok"}
 
-# Where the mixer script lives
+# Paths
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "rtm_audio_pipeline"
 MIXER = PIPELINE_DIR / "rtm_mixer.py"
 
@@ -24,13 +25,12 @@ def _run(cmd: str) -> int:
     print(">>>", cmd)
     return subprocess.run(cmd, shell=True).returncode
 
-# --- Primary API: POST /api/mix ---------------------------------------------
+# -------------------------- /api/mix --------------------------
 @app.post("/api/mix")
 async def mix(
-    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (long, includes sonic logo)
+    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (long, with sonic logo)
     narr: UploadFile = File(...),       # rtm_narration.mp3 (dry voice)
-    outro: UploadFile = File(...),      # rtm_outro_bg.mp3 (~5s with fade)
-    # query (or swagger param) controls:
+    outro: UploadFile = File(...),      # rtm_outro_bg.mp3 (~5s fade bed)
     bg_vol: float = 0.25,
     duck_threshold: float = 0.02,
     duck_ratio: float = 12.0,
@@ -39,10 +39,6 @@ async def mix(
     tp: float = -1.5,
     lra: float = 11.0,
 ):
-    """
-    Mix intro + narration + outro with radio-style ducking & loudness.
-    Returns the final MP3 as the response file.
-    """
     if not MIXER.exists():
         raise HTTPException(500, detail=f"Mixer script not found at {MIXER}")
 
@@ -54,7 +50,10 @@ async def mix(
         out_path    = workdir / f"rtm_final_{uuid.uuid4().hex}.mp3"
 
         intro_path.write_bytes(await intro.read())
-        narr_path.write_bytes(await narr.read())
+        narr_bytes = await narr.read()
+        if not narr_bytes or len(narr_bytes) < 500:
+            raise HTTPException(500, detail="Narration audio is empty or too short")
+        narr_path.write_bytes(narr_bytes)
         outro_path.write_bytes(await outro.read())
 
         cmd = f"""
@@ -78,10 +77,10 @@ async def mix(
 
         return FileResponse(str(out_path), media_type="audio/mpeg", filename="rtm_final_mix.mp3")
     finally:
-        # keep temp dir for now (easier debugging). We can clean later.
+        # keep temp dir for now for easier debugging
         pass
 
-# --- Simple browser form: /upload -------------------------------------------
+# -------------------------- /upload (simple browser form) --------------------------
 @app.get("/upload", response_class=HTMLResponse)
 def upload_form():
     return """
@@ -103,15 +102,13 @@ async def upload_and_mix(
     narr: UploadFile = File(...),
     outro: UploadFile = File(...),
 ):
-    # Use defaults; you can tune later via /api/mix directly
     return await mix(
         intro=intro, narr=narr, outro=outro,
         bg_vol=0.25, duck_threshold=0.02, duck_ratio=12.0,
         xfade=1.0, lufs=-16.0, tp=-1.5, lra=11.0
     )
 
-# --- Generate narration via ElevenLabs and mix: /generate --------------------
-import httpx
+# -------------------------- /generate (ElevenLabs TTS) --------------------------
 ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
 @app.get("/generate", response_class=HTMLResponse)
@@ -148,28 +145,48 @@ async def generate_and_mix(
     if not ELEVEN_KEY:
         raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
 
-    # Call ElevenLabs v1 TTS stream API (returns MP3 bytes)
+    # ElevenLabs v1 TTS stream → MP3 bytes
     tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     headers = {
         "xi-api-key": ELEVEN_KEY,
         "accept": "audio/mpeg",
         "Content-Type": "application/json",
     }
-    payload = {"text": script, "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}}
+    # Being explicit about model/output helps avoid silent failures
+    payload = {
+        "text": script,
+        "model_id": "eleven_turbo_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
+        "output_format": "mp3_44100_128"
+    }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(tts_url, headers=headers, json=payload)
-        if r.status_code != 200 or not r.content:
-            raise HTTPException(500, detail=f"TTS failed: {r.status_code} {r.text[:200]}")
+        print(">>> TTS status:", r.status_code, "bytes:", len(r.content))
+        if r.status_code != 200 or not r.content or len(r.content) < 500:
+            # include a short preview of text response if any
+            preview = r.text[:200] if r.text else ""
+            raise HTTPException(500, detail=f"TTS failed or returned no audio. Status={r.status_code} {preview}")
 
-        # Wrap TTS result like an UploadFile for reuse with /api/mix
+        # Quick MP3 sanity check: most mp3s start with "ID3"
+        if not (len(r.content) > 3 and r.content[:3] == b"ID3"):
+            # It's still valid MP3 even without ID3 sometimes, so we don't hard fail—just log.
+            print(">>> Warning: TTS MP3 missing ID3 header; proceeding anyway.")
+
+        # Write TTS bytes to a temp mp3 so we can verify length in logs if needed
+        tmpdir = Path(tempfile.mkdtemp(prefix="rtm_tts_"))
+        tts_mp3_path = tmpdir / "rtm_narration.mp3"
+        tts_mp3_path.write_bytes(r.content)
+        print(f">>> Saved TTS MP3 to {tts_mp3_path} ({tts_mp3_path.stat().st_size} bytes)")
+
+        # Wrap like an UploadFile for reuse with /api/mix
         class MemUpload:
             filename = "rtm_narration.mp3"
             async def read(self):
                 return r.content
         narr = MemUpload()
 
-    # Reuse the main mixer with defaults
+    # Reuse main mixer with defaults
     return await mix(
         intro=intro, narr=narr, outro=outro,
         bg_vol=0.25, duck_threshold=0.02, duck_ratio=12.0,
