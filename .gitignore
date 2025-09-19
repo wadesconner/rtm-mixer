@@ -1,7 +1,31 @@
+# OS junk
+.DS_Store
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
 .env
+.python-version
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Tests & tooling
+.pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# Build/output
+dist/
+build/
+
+# RTM mixer intermediates
 *.core_mix.mp3
 *.core_plus_outro.mp3
-
-.DS_Store
