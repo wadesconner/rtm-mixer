@@ -50,16 +50,31 @@ def main():
     core_plus_outro = out.with_suffix(".core_plus_outro.mp3")
 
     # Step 1: Mix intro BG + narration (duck BG under narration, stop at narration end)
-    cmd1 = f"""
-ffmpeg -y -i {shlex.quote(str(intro))} -i {shlex.quote(str(narr))} -filter_complex "
-[0:a]volume={args.bg_vol},aresample=48000,pan=stereo|c0=c0|c1=c1[bg];
+   cmd1 = f"""
+ffmpeg -y -i {shlex.quote(str(intro))} -i {shlex.quote(str(narr))} \
+-filter_complex "
+[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,volume={args.bg_vol}[bgpre];
 [1:a]aresample=48000,pan=stereo|c0=c0|c1=c1[narr];
-[bg][narr]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[ducked_bg];
-[ducked_bg][narr]amix=inputs=2:duration=shortest:dropout_transition=0,
+[bgpre][narr]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[ducked];
+[ducked]volume={args.bg_vol}[bgpost];
+[bgpost][narr]amix=inputs=2:duration=shortest:dropout_transition=0,
 dynaudnorm=f=75:g=10,
 loudnorm=I={args.lufs}:TP={args.tp}:LRA={args.lra}[mix]
 " -map "[mix]" -ar 48000 -ac 2 -c:a libmp3lame -b:a 192k {shlex.quote(str(core_mix))}
 """.strip()
+cmd1 = f"""
+ffmpeg -y -i {shlex.quote(str(intro))} -i {shlex.quote(str(narr))} \
+-filter_complex "
+[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,volume={args.bg_vol}[bgpre];
+[1:a]aresample=48000,pan=stereo|c0=c0|c1=c1[narr];
+[bgpre][narr]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[ducked];
+[ducked]volume={args.bg_vol}[bgpost];
+[bgpost][narr]amix=inputs=2:duration=shortest:dropout_transition=0,
+dynaudnorm=f=75:g=10,
+loudnorm=I={args.lufs}:TP={args.tp}:LRA={args.lra}[mix]
+" -map "[mix]" -ar 48000 -ac 2 -c:a libmp3lame -b:a 192k {shlex.quote(str(core_mix))}
+""".strip()
+
     run(cmd1)
 
     # Step 2: Crossfade into the outro bed
