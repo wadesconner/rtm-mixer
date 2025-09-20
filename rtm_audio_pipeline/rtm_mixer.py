@@ -4,7 +4,7 @@ RTM Mixer - intro BG + narration + outro bed -> polished MP3 using ffmpeg.
 
 - Applies bg_vol ONCE (pre-duck).
 - Voice label uses [vo] (avoids rare binding collisions).
-- Optional --voice_only switch to verify Clyde path quickly.
+- Optional --voice_only switch now outputs *only* the narration (no outro).
 - Loudness normalization at the FINAL step only.
 - Verbose logging of filter graphs and ffmpeg output.
 """
@@ -53,7 +53,7 @@ def main():
     ap.add_argument("--lra", type=float, default=11.0, help="Loudness range")
 
     # Diagnostics
-    ap.add_argument("--voice_only", action="store_true", help="Output voice only for debugging")
+    ap.add_argument("--voice_only", action="store_true", help="Output voice only (no BG/outro) for debugging")
 
     args = ap.parse_args()
 
@@ -76,7 +76,7 @@ def main():
 
     # ---------- STEP 1: Intro BG + Narration ----------
     if args.voice_only:
-        # Voice-only pass-through for quick debugging
+        # Voice-only pass-through for quick debugging (no BG, no outro)
         filter1 = "[1:a]aformat=channel_layouts=stereo,aresample=48000,volume=2.0[mix]"
     else:
         # Apply bg_vol once, duck BG under voice, then mix with explicit weights.
@@ -100,6 +100,12 @@ ffmpeg -hide_banner -v verbose -y \
     if rc1 != 0 or not core_mix.exists():
         print("!!! Step 1 failed")
         sys.exit(1)
+
+    # If voice-only, we’re done: write core_mix straight to output and exit.
+    if args.voice_only:
+        core_mix.replace(out)
+        print(f"✅ Voice-only debug complete. Wrote: {out}")
+        return
 
     # ---------- STEP 2: Crossfade to Outro ----------
     filter2 = f"""
