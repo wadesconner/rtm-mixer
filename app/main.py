@@ -1,4 +1,4 @@
-# main.py
+# main.py (diagnostic build)
 import os
 import shlex
 import subprocess
@@ -13,23 +13,19 @@ from typing import Optional
 
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 import httpx
 
-app = FastAPI(title="RTM Mixer API")
+app = FastAPI(title="RTM Mixer API (diag)")
 
-# -------------------------- Healthcheck --------------------------
 @app.get("/")
 def root():
     return {"status": "ok"}
 
-# -------------------------- Paths --------------------------
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "rtm_audio_pipeline"
 MIXER = PIPELINE_DIR / "rtm_mixer.py"
 
-# -------------------------- Shell + debug helpers --------------------------
 def _run(cmd: str) -> int:
-    """Run shell command; print stdout/stderr so Render logs show everything."""
     print(">>>", cmd)
     p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if p.stdout:
@@ -39,7 +35,6 @@ def _run(cmd: str) -> int:
     return p.returncode
 
 def _ffprobe(path: Path):
-    """Print short ffprobe JSON for debugging."""
     cmd = (
         f'ffprobe -hide_banner -v error '
         f'-show_entries stream=channels,sample_rate '
@@ -75,13 +70,38 @@ def _stat(path: Path) -> dict:
     except FileNotFoundError:
         return {"exists": False}
 
-# -------------------------- /api/mix (GET helper) --------------------------
+# ---------- Debug: confirm we’re running the mixer you expect ----------
+@app.get("/debug/mixer")
+def debug_mixer():
+    if not MIXER.exists():
+        raise HTTPException(404, detail=f"Mixer not found at {MIXER}")
+    txt = (MIXER.read_text(errors="ignore")).splitlines()
+    head = "\n".join(txt[:120])
+    return {"path": str(MIXER), "stat": _stat(MIXER), "sha256": _sha256(MIXER), "head": head}
+
+# ---------- Debug: inspect file uploads without mixing ----------
+@app.post("/debug/inspect_upload")
+async def inspect_upload(
+    intro: UploadFile = File(...),
+    narr: UploadFile = File(...),
+    outro: UploadFile = File(...),
+):
+    intro_b = await intro.read()
+    narr_b = await narr.read()
+    outro_b = await outro.read()
+    return {
+        "intro_bytes": len(intro_b),
+        "narr_bytes": len(narr_b),
+        "outro_bytes": len(outro_b),
+        "intro_name": intro.filename,
+        "narr_name": narr.filename,
+        "outro_name": outro.filename,
+        "note": "These are the raw sizes that /api/mix would receive."
+    }
+
+# ---------- Friendly GET for /api/mix ----------
 @app.get("/api/mix")
 async def api_mix_get():
-    """
-    Friendly GET so opening /api/mix in a browser doesn't 405.
-    Explains how to POST multipart/form-data with intro/narr/outro files.
-    """
     return JSONResponse({
         "status": "ok",
         "how_to_use": "POST multipart/form-data to /api/mix with 3 files and optional knobs.",
@@ -110,13 +130,12 @@ async def api_mix_get():
         ],
     })
 
-# -------------------------- /api/mix (POST real mixer) --------------------------
+# ---------- Real mixer ----------
 @app.post("/api/mix")
 async def mix(
-    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (bed)
-    narr: UploadFile = File(...),       # rtm_narration.mp3 (voice)
-    outro: UploadFile = File(...),      # rtm_outro_bg.mp3
-    # query params (optional)
+    intro: UploadFile = File(...),
+    narr: UploadFile = File(...),
+    outro: UploadFile = File(...),
     bg_vol: Optional[float] = Query(None),
     duck_threshold: Optional[float] = Query(None),
     duck_ratio: Optional[float] = Query(None),
@@ -124,8 +143,7 @@ async def mix(
     lufs: Optional[float] = Query(None),
     tp: Optional[float] = Query(None),
     lra: Optional[float] = Query(None),
-    voice_only: Optional[int] = Query(0),  # 1 enables voice-only diagnostic pass-through
-    # form fallbacks
+    voice_only: Optional[int] = Query(0),
     bg_vol_form: Optional[float] = Form(None),
     duck_threshold_form: Optional[float] = Form(None),
     duck_ratio_form: Optional[float] = Form(None),
@@ -153,36 +171,47 @@ async def mix(
         outro_path  = workdir / "rtm_outro_bg.mp3"
         out_path    = workdir / f"rtm_final_{uuid.uuid4().hex}.mp3"
 
-        # Write uploaded files and log sizes
-        intro_bytes = await intro.read()
-        intro_path.write_bytes(intro_bytes)
-        print(f"[mix] wrote intro {intro_path} bytes={len(intro_bytes)}")
+        try:
+            intro_bytes = await intro.read()
+            intro_path.write_bytes(intro_bytes)
+            print(f"[mix] wrote intro {intro_path} bytes={len(intro_bytes)}")
+        except Exception as e:
+            print(f"[mix] ERROR reading/writing intro: {e}")
+            raise HTTPException(500, detail=f"Intro read/write error: {e}")
 
-        narr_bytes = await narr.read()
-        if not narr_bytes or len(narr_bytes) < 500:
-            raise HTTPException(500, detail="Narration audio is empty or too short")
-        narr_path.write_bytes(narr_bytes)
-        print(f"[mix] wrote narr  {narr_path} bytes={len(narr_bytes)}")
+        try:
+            narr_bytes = await narr.read()
+            print(f"[mix] narr read bytes={len(narr_bytes)}")
+            if not narr_bytes or len(narr_bytes) < 500:
+                raise HTTPException(500, detail="Narration audio is empty or too short")
+            narr_path.write_bytes(narr_bytes)
+            print(f"[mix] wrote narr  {narr_path} bytes={len(narr_bytes)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[mix] ERROR reading/writing narr: {e}")
+            raise HTTPException(500, detail=f"Narration read/write error: {e}")
 
-        outro_bytes = await outro.read()
-        outro_path.write_bytes(outro_bytes)
-        print(f"[mix] wrote outro {outro_path} bytes={len(outro_bytes)}")
+        try:
+            outro_bytes = await outro.read()
+            outro_path.write_bytes(outro_bytes)
+            print(f"[mix] wrote outro {outro_path} bytes={len(outro_bytes)}")
+        except Exception as e:
+            print(f"[mix] ERROR reading/writing outro: {e}")
+            raise HTTPException(500, detail=f"Outro read/write error: {e}")
 
-        # ffprobe the three inputs (duration/channels/sample_rate)
         _ffprobe(intro_path)
         _ffprobe(narr_path)
         _ffprobe(outro_path)
 
-        # Log which mixer file we are about to run
         print(f"[mix] Using MIXER at {MIXER}")
         print(f"[mix] MIXER stat: {_stat(MIXER)}")
         try:
             print(f"[mix] MIXER sha256: {_sha256(MIXER)}")
         except Exception as e:
-            print(f"[mix] MIXER sha256: <error: {e}>")
+            print(f"[mix] MIXER sha256 error: {e}")
 
         voice_only_flag = "--voice_only" if voice_only else ""
-
         cmd = f"""
         python {shlex.quote(str(MIXER))} \
           --intro {shlex.quote(str(intro_path))} \
@@ -205,15 +234,13 @@ async def mix(
 
         return FileResponse(str(out_path), media_type="audio/mpeg", filename="rtm_final_mix.mp3")
     finally:
-        # keep temp dir for debugging
         pass
 
-# -------------------------- /upload (simple browser form) --------------------------
 @app.get("/upload", response_class=HTMLResponse)
 def upload_form():
     return """
     <html><body style="font-family: system-ui; padding: 24px; line-height:1.4">
-      <h2>RTM Mixer</h2>
+      <h2>RTM Mixer (diag)</h2>
       <form action="/upload" method="post" enctype="multipart/form-data">
         <div>Intro (mp3): <input type="file" name="intro" accept="audio/mpeg" required></div>
         <div>Narration (mp3): <input type="file" name="narr" accept="audio/mpeg" required></div>
@@ -227,6 +254,15 @@ def upload_form():
         </fieldset>
         <div style="margin-top:12px"><button type="submit">Mix</button></div>
       </form>
+
+      <h3 style="margin-top:28px">Debug: Inspect Upload</h3>
+      <form action="/debug/inspect_upload" method="post" enctype="multipart/form-data">
+        <div>Intro (mp3): <input type="file" name="intro" accept="audio/mpeg" required></div>
+        <div>Narration (mp3): <input type="file" name="narr" accept="audio/mpeg" required></div>
+        <div>Outro (mp3): <input type="file" name="outro" accept="audio/mpeg" required></div>
+        <div style="margin-top:12px"><button type="submit">Inspect</button></div>
+      </form>
+
       <p style="margin-top:24px"><a href="/generate">Or generate narration from text →</a></p>
     </body></html>
     """
@@ -241,14 +277,13 @@ async def upload_and_mix(
     duck_ratio_form: Optional[float] = Form(12.0),
     xfade_form: Optional[float] = Form(1.0),
 ):
-    # hand values through to /api/mix
     return await mix(
         intro=intro, narr=narr, outro=outro,
         bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
         xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
     )
 
-# -------------------------- /generate (ElevenLabs TTS) --------------------------
+# ----------- /generate (unchanged from working version) -----------
 ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
 @app.get("/generate", response_class=HTMLResponse)
@@ -296,59 +331,6 @@ async def generate_and_mix(
     if not ELEVEN_KEY:
         raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
 
-    # ElevenLabs v1 TTS stream → MP3 bytes
-    tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-    headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
-    payload = {
-        "text": script,
-        "model_id": "eleven_turbo_v2",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
-        "output_format": "mp3_44100_128"
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(tts_url, headers=headers, json=payload)
-        print(">>> TTS status:", r.status_code, "bytes:", len(r.content))
-        if r.status_code != 200 or not r.content or len(r.content) < 500:
-            preview = r.text[:200] if r.text else ""
-            raise HTTPException(500, detail=f"TTS failed or returned no audio. Status={r.status_code} {preview}")
-
-        # Wrap TTS bytes as a REAL UploadFile for reuse with /api/mix
-        narr = StarletteUploadFile(
-            filename="rtm_narration.mp3",
-            file=BytesIO(r.content),
-            content_type="audio/mpeg"
-        )
-
-    # forward to mixer with the user-selected knobs
-    return await mix(
-        intro=intro, narr=narr, outro=outro,
-        bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
-        xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
-    )
-
-# -------------------------- Debug endpoints --------------------------
-@app.get("/debug/mixer")
-def debug_mixer():
-    if not MIXER.exists():
-        raise HTTPException(404, detail=f"Mixer not found at {MIXER}")
-    txt = (MIXER.read_text(errors="ignore")).splitlines()
-    head = "\n".join(txt[:120])  # first ~120 lines
-    return {
-        "path": str(MIXER),
-        "stat": _stat(MIXER),
-        "sha256": _sha256(MIXER),
-        "head": head
-    }
-
-@app.post("/debug/echo_narr")
-async def echo_narr(
-    script: str = Form(...),
-    voice_id: str = Form(...),
-):
-    if not ELEVEN_KEY:
-        raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
-
     tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
     payload = {"text": script, "model_id": "eleven_turbo_v2", "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}, "output_format": "mp3_44100_128"}
@@ -358,9 +340,16 @@ async def echo_narr(
         print(">>> TTS status:", r.status_code, "bytes:", len(r.content))
         if r.status_code != 200 or not r.content or len(r.content) < 500:
             preview = r.text[:200] if r.text else ""
-            raise HTTPException(500, detail=f"TTS failed or empty. Status={r.status_code} {preview}")
+            raise HTTPException(500, detail=f"TTS failed or returned no audio. Status={r.status_code} {preview}")
 
-    tmp = Path(tempfile.mkdtemp(prefix="rtm_dbg_")) / "narr.mp3"
-    tmp.write_bytes(r.content)
-    _ffprobe(tmp)
-    return FileResponse(str(tmp), media_type="audio/mpeg", filename="narr_debug.mp3")
+        narr = StarletteUploadFile(
+            filename="rtm_narration.mp3",
+            file=BytesIO(r.content),
+            content_type="audio/mpeg"
+        )
+
+    return await mix(
+        intro=intro, narr=narr, outro=outro,
+        bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
+        xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
+    )
