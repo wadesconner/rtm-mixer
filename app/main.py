@@ -3,6 +3,9 @@ import shlex
 import subprocess
 import tempfile
 import uuid
+from io import BytesIO
+from starlette.datastructures import UploadFile as StarletteUploadFile
+
 from pathlib import Path
 from typing import Optional
 
@@ -242,12 +245,13 @@ async def generate_and_mix(
             preview = r.text[:200] if r.text else ""
             raise HTTPException(500, detail=f"TTS failed or returned no audio. Status={r.status_code} {preview}")
 
-        # Wrap TTS bytes like an UploadFile for reuse with /api/mix
-        class MemUpload:
-            filename = "rtm_narration.mp3"
-            async def read(self):
-                return r.content
-        narr = MemUpload()
+       # Wrap TTS bytes as a REAL UploadFile for reuse with /api/mix
+narr = StarletteUploadFile(
+    filename="rtm_narration.mp3",
+    file=BytesIO(r.content),
+    content_type="audio/mpeg"
+)
+
 
     # forward to mixer with the user-selected knobs
     return await mix(
