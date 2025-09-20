@@ -26,21 +26,40 @@ def _run(cmd: str) -> int:
     return subprocess.run(cmd, shell=True).returncode
 
 # -------------------------- /api/mix --------------------------
+# Accepts knobs as query params OR form fields (both work).
 @app.post("/api/mix")
 async def mix(
     intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (long, with sonic logo)
     narr: UploadFile = File(...),       # rtm_narration.mp3 (dry voice)
     outro: UploadFile = File(...),      # rtm_outro_bg.mp3 (~5s fade bed)
-    bg_vol: float = 0.25,
-    duck_threshold: float = 0.02,
-    duck_ratio: float = 12.0,
-    xfade: float = 1.0,
-    lufs: float = -16.0,
-    tp: float = -1.5,
-    lra: float = 11.0,
+    # query params (optional)
+    bg_vol: Optional[float] = None,
+    duck_threshold: Optional[float] = None,
+    duck_ratio: Optional[float] = None,
+    xfade: Optional[float] = None,
+    lufs: Optional[float] = None,
+    tp: Optional[float] = None,
+    lra: Optional[float] = None,
+    # form fallbacks (so the HTML forms can pass these too)
+    bg_vol_form: Optional[float] = Form(None),
+    duck_threshold_form: Optional[float] = Form(None),
+    duck_ratio_form: Optional[float] = Form(None),
+    xfade_form: Optional[float] = Form(None),
+    lufs_form: Optional[float] = Form(None),
+    tp_form: Optional[float] = Form(None),
+    lra_form: Optional[float] = Form(None),
 ):
     if not MIXER.exists():
         raise HTTPException(500, detail=f"Mixer script not found at {MIXER}")
+
+    # prefer query value; else form; else default
+    bg_vol = bg_vol if bg_vol is not None else (bg_vol_form if bg_vol_form is not None else 0.25)
+    duck_threshold = duck_threshold if duck_threshold is not None else (duck_threshold_form if duck_threshold_form is not None else 0.02)
+    duck_ratio = duck_ratio if duck_ratio is not None else (duck_ratio_form if duck_ratio_form is not None else 12.0)
+    xfade = xfade if xfade is not None else (xfade_form if xfade_form is not None else 1.0)
+    lufs = lufs if lufs is not None else (lufs_form if lufs_form is not None else -16.0)
+    tp = tp if tp is not None else (tp_form if tp_form is not None else -1.5)
+    lra = lra if lra is not None else (lra_form if lra_form is not None else 11.0)
 
     workdir = Path(tempfile.mkdtemp(prefix="rtm_mix_"))
     try:
@@ -77,7 +96,7 @@ async def mix(
 
         return FileResponse(str(out_path), media_type="audio/mpeg", filename="rtm_final_mix.mp3")
     finally:
-        # keep temp dir for now for easier debugging
+        # keep temp dir for now (debuggability)
         pass
 
 # -------------------------- /upload (simple browser form) --------------------------
@@ -90,6 +109,13 @@ def upload_form():
         <div>Intro (mp3): <input type="file" name="intro" accept="audio/mpeg" required></div>
         <div>Narration (mp3): <input type="file" name="narr" accept="audio/mpeg" required></div>
         <div>Outro (mp3): <input type="file" name="outro" accept="audio/mpeg" required></div>
+        <fieldset style="margin-top:16px">
+          <legend>Mix Settings</legend>
+          <div>bg_vol: <input type="number" step="0.01" name="bg_vol_form" value="0.25"></div>
+          <div>duck_threshold: <input type="number" step="0.001" name="duck_threshold_form" value="0.02"></div>
+          <div>duck_ratio: <input type="number" step="1" name="duck_ratio_form" value="12"></div>
+          <div>xfade: <input type="number" step="0.1" name="xfade_form" value="1.0"></div>
+        </fieldset>
         <div style="margin-top:12px"><button type="submit">Mix</button></div>
       </form>
       <p style="margin-top:24px"><a href="/generate">Or generate narration from text →</a></p>
@@ -101,11 +127,16 @@ async def upload_and_mix(
     intro: UploadFile = File(...),
     narr: UploadFile = File(...),
     outro: UploadFile = File(...),
+    bg_vol_form: Optional[float] = Form(0.25),
+    duck_threshold_form: Optional[float] = Form(0.02),
+    duck_ratio_form: Optional[float] = Form(12.0),
+    xfade_form: Optional[float] = Form(1.0),
 ):
+    # hand values through to /api/mix
     return await mix(
         intro=intro, narr=narr, outro=outro,
-        bg_vol=0.25, duck_threshold=0.02, duck_ratio=12.0,
-        xfade=1.0, lufs=-16.0, tp=-1.5, lra=11.0
+        bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
+        xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
     )
 
 # -------------------------- /generate (ElevenLabs TTS) --------------------------
@@ -130,6 +161,13 @@ Here we go!
         </div>
         <div style="margin-top:12px">Intro (mp3): <input type="file" name="intro" accept="audio/mpeg" required></div>
         <div>Outro (mp3): <input type="file" name="outro" accept="audio/mpeg" required></div>
+        <fieldset style="margin-top:16px">
+          <legend>Mix Settings</legend>
+          <div>bg_vol: <input type="number" step="0.01" name="bg_vol_form" value="0.25"></div>
+          <div>duck_threshold: <input type="number" step="0.001" name="duck_threshold_form" value="0.02"></div>
+          <div>duck_ratio: <input type="number" step="1" name="duck_ratio_form" value="12"></div>
+          <div>xfade: <input type="number" step="0.1" name="xfade_form" value="1.0"></div>
+        </fieldset>
         <div style="margin-top:12px"><button type="submit">Generate & Mix</button></div>
       </form>
     </body></html>
@@ -141,6 +179,10 @@ async def generate_and_mix(
     voice_id: str = Form(...),
     intro: UploadFile = File(...),
     outro: UploadFile = File(...),
+    bg_vol_form: Optional[float] = Form(0.25),
+    duck_threshold_form: Optional[float] = Form(0.02),
+    duck_ratio_form: Optional[float] = Form(12.0),
+    xfade_form: Optional[float] = Form(1.0),
 ):
     if not ELEVEN_KEY:
         raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
@@ -152,7 +194,6 @@ async def generate_and_mix(
         "accept": "audio/mpeg",
         "Content-Type": "application/json",
     }
-    # Being explicit about model/output helps avoid silent failures
     payload = {
         "text": script,
         "model_id": "eleven_turbo_v2",
@@ -164,31 +205,19 @@ async def generate_and_mix(
         r = await client.post(tts_url, headers=headers, json=payload)
         print(">>> TTS status:", r.status_code, "bytes:", len(r.content))
         if r.status_code != 200 or not r.content or len(r.content) < 500:
-            # include a short preview of text response if any
             preview = r.text[:200] if r.text else ""
             raise HTTPException(500, detail=f"TTS failed or returned no audio. Status={r.status_code} {preview}")
 
-        # Quick MP3 sanity check: most mp3s start with "ID3"
-        if not (len(r.content) > 3 and r.content[:3] == b"ID3"):
-            # It's still valid MP3 even without ID3 sometimes, so we don't hard fail—just log.
-            print(">>> Warning: TTS MP3 missing ID3 header; proceeding anyway.")
-
-        # Write TTS bytes to a temp mp3 so we can verify length in logs if needed
-        tmpdir = Path(tempfile.mkdtemp(prefix="rtm_tts_"))
-        tts_mp3_path = tmpdir / "rtm_narration.mp3"
-        tts_mp3_path.write_bytes(r.content)
-        print(f">>> Saved TTS MP3 to {tts_mp3_path} ({tts_mp3_path.stat().st_size} bytes)")
-
-        # Wrap like an UploadFile for reuse with /api/mix
+        # Wrap TTS bytes like an UploadFile for reuse with /api/mix
         class MemUpload:
             filename = "rtm_narration.mp3"
             async def read(self):
                 return r.content
         narr = MemUpload()
 
-    # Reuse main mixer with defaults
+    # forward to mixer with the user-selected knobs
     return await mix(
         intro=intro, narr=narr, outro=outro,
-        bg_vol=0.25, duck_threshold=0.02, duck_ratio=12.0,
-        xfade=1.0, lufs=-16.0, tp=-1.5, lra=11.0
+        bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
+        xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
     )
