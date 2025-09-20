@@ -130,20 +130,22 @@ async def api_mix_get():
         ],
     })
 
-# ---------- Real mixer ----------
+# -------------------------- /api/mix (POST real mixer) --------------------------
 @app.post("/api/mix")
 async def mix(
-    intro: UploadFile = File(...),
-    narr: UploadFile = File(...),
-    outro: UploadFile = File(...),
-    bg_vol: Optional[float] = Query(None),
-    duck_threshold: Optional[float] = Query(None),
-    duck_ratio: Optional[float] = Query(None),
-    xfade: Optional[float] = Query(None),
-    lufs: Optional[float] = Query(None),
-    tp: Optional[float] = Query(None),
-    lra: Optional[float] = Query(None),
-    voice_only: Optional[int] = Query(0),
+    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (bed)
+    narr: UploadFile = File(...),       # rtm_narration.mp3 (voice)
+    outro: UploadFile = File(...),      # rtm_outro_bg.mp3
+    # query params (optional) — use plain defaults so direct Python calls work
+    bg_vol: Optional[float] = None,
+    duck_threshold: Optional[float] = None,
+    duck_ratio: Optional[float] = None,
+    xfade: Optional[float] = None,
+    lufs: Optional[float] = None,
+    tp: Optional[float] = None,
+    lra: Optional[float] = None,
+    voice_only: Optional[int] = 0,  # <-- plain default, not Query(...)
+    # form fallbacks (so the HTML forms can pass these too)
     bg_vol_form: Optional[float] = Form(None),
     duck_threshold_form: Optional[float] = Form(None),
     duck_ratio_form: Optional[float] = Form(None),
@@ -155,7 +157,7 @@ async def mix(
     if not MIXER.exists():
         raise HTTPException(500, detail=f"Mixer script not found at {MIXER}")
 
-    # prefer query; else form; else default
+    # prefer query value; else form; else default
     bg_vol = bg_vol if bg_vol is not None else (bg_vol_form if bg_vol_form is not None else 0.25)
     duck_threshold = duck_threshold if duck_threshold is not None else (duck_threshold_form if duck_threshold_form is not None else 0.02)
     duck_ratio = duck_ratio if duck_ratio is not None else (duck_ratio_form if duck_ratio_form is not None else 12.0)
@@ -164,6 +166,12 @@ async def mix(
     tp = tp if tp is not None else (tp_form if tp_form is not None else -1.5)
     lra = lra if lra is not None else (lra_form if lra_form is not None else 11.0)
 
+    # robustly coerce voice_only -> 0/1 (handles None, "", "0", Query objects, etc.)
+    try:
+        voice_only_val = int(voice_only) if voice_only is not None else 0
+    except Exception:
+        voice_only_val = 0
+
     workdir = Path(tempfile.mkdtemp(prefix="rtm_mix_"))
     try:
         intro_path  = workdir / "rtm_intro_bg.mp3"
@@ -171,34 +179,19 @@ async def mix(
         outro_path  = workdir / "rtm_outro_bg.mp3"
         out_path    = workdir / f"rtm_final_{uuid.uuid4().hex}.mp3"
 
-        try:
-            intro_bytes = await intro.read()
-            intro_path.write_bytes(intro_bytes)
-            print(f"[mix] wrote intro {intro_path} bytes={len(intro_bytes)}")
-        except Exception as e:
-            print(f"[mix] ERROR reading/writing intro: {e}")
-            raise HTTPException(500, detail=f"Intro read/write error: {e}")
+        intro_bytes = await intro.read()
+        intro_path.write_bytes(intro_bytes)
+        print(f"[mix] wrote intro {intro_path} bytes={len(intro_bytes)}")
 
-        try:
-            narr_bytes = await narr.read()
-            print(f"[mix] narr read bytes={len(narr_bytes)}")
-            if not narr_bytes or len(narr_bytes) < 500:
-                raise HTTPException(500, detail="Narration audio is empty or too short")
-            narr_path.write_bytes(narr_bytes)
-            print(f"[mix] wrote narr  {narr_path} bytes={len(narr_bytes)}")
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"[mix] ERROR reading/writing narr: {e}")
-            raise HTTPException(500, detail=f"Narration read/write error: {e}")
+        narr_bytes = await narr.read()
+        if not narr_bytes or len(narr_bytes) < 500:
+            raise HTTPException(500, detail="Narration audio is empty or too short")
+        narr_path.write_bytes(narr_bytes)
+        print(f"[mix] wrote narr  {narr_path} bytes={len(narr_bytes)}")
 
-        try:
-            outro_bytes = await outro.read()
-            outro_path.write_bytes(outro_bytes)
-            print(f"[mix] wrote outro {outro_path} bytes={len(outro_bytes)}")
-        except Exception as e:
-            print(f"[mix] ERROR reading/writing outro: {e}")
-            raise HTTPException(500, detail=f"Outro read/write error: {e}")
+        outro_bytes = await outro.read()
+        outro_path.write_bytes(outro_bytes)
+        print(f"[mix] wrote outro {outro_path} bytes={len(outro_bytes)}")
 
         _ffprobe(intro_path)
         _ffprobe(narr_path)
@@ -209,9 +202,11 @@ async def mix(
         try:
             print(f"[mix] MIXER sha256: {_sha256(MIXER)}")
         except Exception as e:
-            print(f"[mix] MIXER sha256 error: {e}")
+            print(f"[mix] MIXER sha256: <error: {e}>")
 
-        voice_only_flag = "--voice_only" if voice_only else ""
+        # build command; only add --voice_only when explicitly set to 1
+        voice_only_flag = "--voice_only" if voice_only_val == 1 else ""
+
         cmd = f"""
         python {shlex.quote(str(MIXER))} \
           --intro {shlex.quote(str(intro_path))} \
@@ -234,7 +229,9 @@ async def mix(
 
         return FileResponse(str(out_path), media_type="audio/mpeg", filename="rtm_final_mix.mp3")
     finally:
+        # keep temp dir for debugging
         pass
+
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_form():
