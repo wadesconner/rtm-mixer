@@ -5,12 +5,14 @@ import subprocess
 import tempfile
 import uuid
 import json
+import hashlib
+import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 from starlette.datastructures import UploadFile as StarletteUploadFile
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import httpx
 
@@ -25,7 +27,7 @@ def root():
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "rtm_audio_pipeline"
 MIXER = PIPELINE_DIR / "rtm_mixer.py"
 
-# -------------------------- Shell helpers --------------------------
+# -------------------------- Shell + debug helpers --------------------------
 def _run(cmd: str) -> int:
     """Run shell command; print stdout/stderr so Render logs show everything."""
     print(">>>", cmd)
@@ -55,6 +57,24 @@ def _ffprobe(path: Path):
     if p.stderr:
         print(">>> [ffprobe stderr]\n", p.stderr)
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _stat(path: Path) -> dict:
+    try:
+        st = path.stat()
+        return {
+            "exists": True,
+            "size": st.st_size,
+            "mtime": datetime.datetime.fromtimestamp(st.st_mtime).isoformat()
+        }
+    except FileNotFoundError:
+        return {"exists": False}
+
 # -------------------------- /api/mix (GET helper) --------------------------
 @app.get("/api/mix")
 async def api_mix_get():
@@ -77,7 +97,8 @@ async def api_mix_get():
             "xfade (float, default 1.0)",
             "lufs (float, default -16.0)",
             "tp (float, default -1.5)",
-            "lra (float, default 11.0)"
+            "lra (float, default 11.0)",
+            "voice_only (0/1 diagnostic)"
         ],
         "example_curl": [
             "curl -X POST https://YOUR_DOMAIN/api/mix \\",
@@ -90,21 +111,21 @@ async def api_mix_get():
     })
 
 # -------------------------- /api/mix (POST real mixer) --------------------------
-# Accepts knobs as query params OR form fields (both work).
 @app.post("/api/mix")
 async def mix(
-    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (long bed)
-    narr: UploadFile = File(...),       # rtm_narration.mp3 (dry voice)
-    outro: UploadFile = File(...),      # rtm_outro_bg.mp3 (~5s)
+    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (bed)
+    narr: UploadFile = File(...),       # rtm_narration.mp3 (voice)
+    outro: UploadFile = File(...),      # rtm_outro_bg.mp3
     # query params (optional)
-    bg_vol: Optional[float] = None,
-    duck_threshold: Optional[float] = None,
-    duck_ratio: Optional[float] = None,
-    xfade: Optional[float] = None,
-    lufs: Optional[float] = None,
-    tp: Optional[float] = None,
-    lra: Optional[float] = None,
-    # form fallbacks (so the HTML forms can pass these too)
+    bg_vol: Optional[float] = Query(None),
+    duck_threshold: Optional[float] = Query(None),
+    duck_ratio: Optional[float] = Query(None),
+    xfade: Optional[float] = Query(None),
+    lufs: Optional[float] = Query(None),
+    tp: Optional[float] = Query(None),
+    lra: Optional[float] = Query(None),
+    voice_only: Optional[int] = Query(0),  # 1 enables voice-only diagnostic pass-through
+    # form fallbacks
     bg_vol_form: Optional[float] = Form(None),
     duck_threshold_form: Optional[float] = Form(None),
     duck_ratio_form: Optional[float] = Form(None),
@@ -116,7 +137,7 @@ async def mix(
     if not MIXER.exists():
         raise HTTPException(500, detail=f"Mixer script not found at {MIXER}")
 
-    # prefer query value; else form; else default
+    # prefer query; else form; else default
     bg_vol = bg_vol if bg_vol is not None else (bg_vol_form if bg_vol_form is not None else 0.25)
     duck_threshold = duck_threshold if duck_threshold is not None else (duck_threshold_form if duck_threshold_form is not None else 0.02)
     duck_ratio = duck_ratio if duck_ratio is not None else (duck_ratio_form if duck_ratio_form is not None else 12.0)
@@ -152,6 +173,16 @@ async def mix(
         _ffprobe(narr_path)
         _ffprobe(outro_path)
 
+        # Log which mixer file we are about to run
+        print(f"[mix] Using MIXER at {MIXER}")
+        print(f"[mix] MIXER stat: {_stat(MIXER)}")
+        try:
+            print(f"[mix] MIXER sha256: {_sha256(MIXER)}")
+        except Exception as e:
+            print(f"[mix] MIXER sha256: <error: {e}>")
+
+        voice_only_flag = "--voice_only" if voice_only else ""
+
         cmd = f"""
         python {shlex.quote(str(MIXER))} \
           --intro {shlex.quote(str(intro_path))} \
@@ -164,7 +195,8 @@ async def mix(
           --xfade {xfade} \
           --lufs {lufs} \
           --tp {tp} \
-          --lra {lra}
+          --lra {lra} \
+          {voice_only_flag}
         """.strip()
 
         rc = _run(cmd)
@@ -173,7 +205,7 @@ async def mix(
 
         return FileResponse(str(out_path), media_type="audio/mpeg", filename="rtm_final_mix.mp3")
     finally:
-        # keep temp dir for debugging; you can clean later if desired
+        # keep temp dir for debugging
         pass
 
 # -------------------------- /upload (simple browser form) --------------------------
@@ -266,11 +298,7 @@ async def generate_and_mix(
 
     # ElevenLabs v1 TTS stream → MP3 bytes
     tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-    headers = {
-        "xi-api-key": ELEVEN_KEY,
-        "accept": "audio/mpeg",
-        "Content-Type": "application/json",
-    }
+    headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
     payload = {
         "text": script,
         "model_id": "eleven_turbo_v2",
@@ -299,7 +327,20 @@ async def generate_and_mix(
         xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
     )
 
-# -------------------------- (Optional) Debug: listen to raw TTS --------------------------
+# -------------------------- Debug endpoints --------------------------
+@app.get("/debug/mixer")
+def debug_mixer():
+    if not MIXER.exists():
+        raise HTTPException(404, detail=f"Mixer not found at {MIXER}")
+    txt = (MIXER.read_text(errors="ignore")).splitlines()
+    head = "\n".join(txt[:120])  # first ~120 lines
+    return {
+        "path": str(MIXER),
+        "stat": _stat(MIXER),
+        "sha256": _sha256(MIXER),
+        "head": head
+    }
+
 @app.post("/debug/echo_narr")
 async def echo_narr(
     script: str = Form(...),
@@ -310,11 +351,7 @@ async def echo_narr(
 
     tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
-    payload = {
-        "text": script, "model_id": "eleven_turbo_v2",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
-        "output_format": "mp3_44100_128"
-    }
+    payload = {"text": script, "model_id": "eleven_turbo_v2", "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}, "output_format": "mp3_44100_128"}
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(tts_url, headers=headers, json=payload)
