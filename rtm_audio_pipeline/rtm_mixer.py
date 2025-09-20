@@ -77,12 +77,13 @@ def main():
     core_plus_outro = out.with_suffix(".core_plus_outro.mp3")
 
     # ---------- STEP 1: Intro BG + Narration ----------
-    # Force stereo/48k; apply BG volume ONCE before ducking; duck BG under voice; amix with voice.
+    # Force stereo/48k; apply BG volume ONCE before ducking; duck BG under voice; amix with explicit weights.
+    # NOTE: use label [vo] (not [narr]) to avoid rare binding collisions seen in logs.
     filter1 = f"""
     [0:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.bg_vol}[bgpre];
-    [1:a]aformat=channel_layouts=stereo,aresample=48000[narr];
-    [bgpre][narr]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bgduck];
-    [bgduck][narr]amix=inputs=2:duration=shortest:dropout_transition=0[mix]
+    [1:a]aformat=channel_layouts=stereo,aresample=48000,volume=1.5[vo];
+    [bgpre][vo]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bgduck];
+    [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_vol} 1.0[mix]
     """.strip().replace("\n", " ")
     print(">>> [filter_complex STEP1]", filter1)
 
