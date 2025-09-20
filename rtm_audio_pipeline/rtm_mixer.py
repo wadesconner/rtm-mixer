@@ -81,7 +81,7 @@ def main():
     # NOTE: use label [vo] (not [narr]) to avoid rare binding collisions seen in logs.
     filter1 = f"""
     [0:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.bg_vol}[bgpre];
-    [1:a]aformat=channel_layouts=stereo,aresample=48000,volume=1.5[vo];
+    [1:a]aformat=channel_layouts=stereo,aresample=48000,volume=2.0[vo];
     [bgpre][vo]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bgduck];
     [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_vol} 1.0[mix]
     """.strip().replace("\n", " ")
