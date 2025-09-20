@@ -2,11 +2,13 @@
 """
 RTM Mixer - intro BG + narration + outro bed -> polished MP3 using ffmpeg.
 
-- Applies bg_vol ONCE (pre-duck).
-- Voice label uses [vo] (avoids rare binding collisions).
-- Optional --voice_only switch for narration-only debug.
-- Loudness normalization at the FINAL step only.
-- Verbose logging of filter graphs and ffmpeg output.
+Voice-forward defaults:
+- High-pass on voice (120 Hz) to clear rumble / leave room for music.
+- Voice gain (default 2.5x ≈ +8 dB).
+- Explicit amix weights (bed:voice = 0.35:1.0) so voice stays on top.
+- Sidechain ducking still active.
+- Loudness normalization at FINAL step.
+- Voice-only debug mode to sanity-check narration path.
 """
 
 import argparse
@@ -47,6 +49,11 @@ def main():
     ap.add_argument("--duck_ratio", type=float, default=12.0, help="Sidechain ratio")
     ap.add_argument("--xfade", type=float, default=1.0, help="Crossfade seconds into outro")
 
+    # Voice-forward knobs
+    ap.add_argument("--voice_gain", type=float, default=2.5, help="Linear gain for voice path before mixing")
+    ap.add_argument("--bg_weight", type=float, default=0.35, help="amix weight for BG")
+    ap.add_argument("--voice_weight", type=float, default=1.0, help="amix weight for Voice")
+
     # Loudness
     ap.add_argument("--lufs", type=float, default=-16.0, help="Integrated LUFS target")
     ap.add_argument("--tp", type=float, default=-1.5, help="True peak ceiling dBTP")
@@ -66,11 +73,12 @@ def main():
         print("One or more input files do not exist.", file=sys.stderr)
         sys.exit(2)
 
-    # Helpful runtime print so we SEE the active knobs in logs
-    print(f"=== RTM MIX PARAMS === bg_vol={args.bg_vol} "
-          f"duck_threshold={args.duck_threshold} duck_ratio={args.duck_ratio} "
-          f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} "
-          f"voice_only={args.voice_only}")
+    print(
+        "=== RTM MIX PARAMS === "
+        f"bg_vol={args.bg_vol} duck_threshold={args.duck_threshold} duck_ratio={args.duck_ratio} "
+        f"voice_gain={args.voice_gain} weights={args.bg_weight}:{args.voice_weight} "
+        f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} voice_only={args.voice_only}"
+    )
 
     if DEBUG:
         ffprobe_info("intro", intro)
@@ -82,16 +90,15 @@ def main():
 
     # ---------- STEP 1: Intro BG + Narration ----------
     if args.voice_only:
-        # Voice-only pass-through for quick debugging (no BG, no outro)
-        filter1 = "[1:a]aformat=channel_layouts=stereo,aresample=48000,volume=2.0[mix]"
+        # Voice-only pass-through (no BG, no outro)
+        filter1 = "[1:a]aformat=channel_layouts=stereo,aresample=48000,highpass=f=120,volume=2.0[mix]"
     else:
-        # Apply bg_vol once, duck BG under voice, then mix with EQUAL weights
-        # so the bed can’t be starved by low bg_vol + ducking.
+        # Voice-forward: BG pre-duck, voice HPF+gain, sidechain duck, amix with explicit weights favoring voice.
         filter1 = f"""
         [0:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.bg_vol}[bgpre];
-        [1:a]aformat=channel_layouts=stereo,aresample=48000,volume=1.5[vo];
+        [1:a]aformat=channel_layouts=stereo,aresample=48000,highpass=f=120,volume={args.voice_gain}[vo];
         [bgpre][vo]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bgduck];
-        [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights=1 1[mix]
+        [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]
         """.strip().replace("\n", " ")
 
     print(">>> [filter_complex STEP1]", filter1)
@@ -108,7 +115,7 @@ ffmpeg -hide_banner -v verbose -y \
         print("!!! Step 1 failed")
         sys.exit(1)
 
-    # If voice-only, we’re done: write core_mix straight to output and exit.
+    # If voice-only, we’re done.
     if args.voice_only:
         core_mix.replace(out)
         print(f"✅ Voice-only debug complete. Wrote: {out}")
@@ -149,7 +156,6 @@ ffmpeg -hide_banner -v verbose -y \
         print("!!! Step 3 (loudnorm) failed")
         sys.exit(1)
 
-    # Cleanup temp intermediates (keep if debugging is enabled)
     if not DEBUG:
         try:
             core_mix.unlink(missing_ok=True)
