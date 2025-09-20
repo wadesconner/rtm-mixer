@@ -1,32 +1,59 @@
+# main.py
 import os
 import shlex
 import subprocess
 import tempfile
 import uuid
+import json
 from io import BytesIO
-from starlette.datastructures import UploadFile as StarletteUploadFile
-
 from pathlib import Path
 from typing import Optional
 
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import httpx
 
 app = FastAPI(title="RTM Mixer API")
 
-# Healthcheck
+# -------------------------- Healthcheck --------------------------
 @app.get("/")
 def root():
     return {"status": "ok"}
 
-# Paths
+# -------------------------- Paths --------------------------
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "rtm_audio_pipeline"
 MIXER = PIPELINE_DIR / "rtm_mixer.py"
 
+# -------------------------- Shell helpers --------------------------
 def _run(cmd: str) -> int:
+    """Run shell command; print stdout/stderr so Render logs show everything."""
     print(">>>", cmd)
-    return subprocess.run(cmd, shell=True).returncode
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if p.stdout:
+        print(">>> [stdout]\n", p.stdout)
+    if p.stderr:
+        print(">>> [stderr]\n", p.stderr)
+    return p.returncode
+
+def _ffprobe(path: Path):
+    """Print short ffprobe JSON for debugging."""
+    cmd = (
+        f'ffprobe -hide_banner -v error '
+        f'-show_entries stream=channels,sample_rate '
+        f'-show_entries format=duration '
+        f'-of json {shlex.quote(str(path))}'
+    )
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    print(f">>> ffprobe {path.name} rc={p.returncode}")
+    if p.stdout:
+        try:
+            j = json.loads(p.stdout)
+            print(">>> [ffprobe]", json.dumps(j, indent=2))
+        except Exception:
+            print(">>> [ffprobe raw]\n", p.stdout[:1000])
+    if p.stderr:
+        print(">>> [ffprobe stderr]\n", p.stderr)
 
 # -------------------------- /api/mix (GET helper) --------------------------
 @app.get("/api/mix")
@@ -57,17 +84,18 @@ async def api_mix_get():
             "  -F intro=@rtm_intro_bg.mp3 \\",
             "  -F narr=@rtm_narration.mp3 \\",
             "  -F outro=@rtm_outro_bg.mp3 \\",
-            "  -F bg_vol=0.0 \\",
+            "  -F bg_vol=0.25 \\",
             "  --output mix.mp3"
         ],
     })
 
 # -------------------------- /api/mix (POST real mixer) --------------------------
+# Accepts knobs as query params OR form fields (both work).
 @app.post("/api/mix")
 async def mix(
-    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (long, with sonic logo)
+    intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (long bed)
     narr: UploadFile = File(...),       # rtm_narration.mp3 (dry voice)
-    outro: UploadFile = File(...),      # rtm_outro_bg.mp3 (~5s fade bed)
+    outro: UploadFile = File(...),      # rtm_outro_bg.mp3 (~5s)
     # query params (optional)
     bg_vol: Optional[float] = None,
     duck_threshold: Optional[float] = None,
@@ -104,12 +132,25 @@ async def mix(
         outro_path  = workdir / "rtm_outro_bg.mp3"
         out_path    = workdir / f"rtm_final_{uuid.uuid4().hex}.mp3"
 
-        intro_path.write_bytes(await intro.read())
+        # Write uploaded files and log sizes
+        intro_bytes = await intro.read()
+        intro_path.write_bytes(intro_bytes)
+        print(f"[mix] wrote intro {intro_path} bytes={len(intro_bytes)}")
+
         narr_bytes = await narr.read()
         if not narr_bytes or len(narr_bytes) < 500:
             raise HTTPException(500, detail="Narration audio is empty or too short")
         narr_path.write_bytes(narr_bytes)
-        outro_path.write_bytes(await outro.read())
+        print(f"[mix] wrote narr  {narr_path} bytes={len(narr_bytes)}")
+
+        outro_bytes = await outro.read()
+        outro_path.write_bytes(outro_bytes)
+        print(f"[mix] wrote outro {outro_path} bytes={len(outro_bytes)}")
+
+        # ffprobe the three inputs (duration/channels/sample_rate)
+        _ffprobe(intro_path)
+        _ffprobe(narr_path)
+        _ffprobe(outro_path)
 
         cmd = f"""
         python {shlex.quote(str(MIXER))} \
@@ -132,7 +173,7 @@ async def mix(
 
         return FileResponse(str(out_path), media_type="audio/mpeg", filename="rtm_final_mix.mp3")
     finally:
-        # keep temp dir for now (debuggability)
+        # keep temp dir for debugging; you can clean later if desired
         pass
 
 # -------------------------- /upload (simple browser form) --------------------------
@@ -257,3 +298,32 @@ async def generate_and_mix(
         bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
         xfade=xfade_form, lufs=-16.0, tp=-1.5, lra=11.0
     )
+
+# -------------------------- (Optional) Debug: listen to raw TTS --------------------------
+@app.post("/debug/echo_narr")
+async def echo_narr(
+    script: str = Form(...),
+    voice_id: str = Form(...),
+):
+    if not ELEVEN_KEY:
+        raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
+
+    tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
+    headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
+    payload = {
+        "text": script, "model_id": "eleven_turbo_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
+        "output_format": "mp3_44100_128"
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(tts_url, headers=headers, json=payload)
+        print(">>> TTS status:", r.status_code, "bytes:", len(r.content))
+        if r.status_code != 200 or not r.content or len(r.content) < 500:
+            preview = r.text[:200] if r.text else ""
+            raise HTTPException(500, detail=f"TTS failed or empty. Status={r.status_code} {preview}")
+
+    tmp = Path(tempfile.mkdtemp(prefix="rtm_dbg_")) / "narr.mp3"
+    tmp.write_bytes(r.content)
+    _ffprobe(tmp)
+    return FileResponse(str(tmp), media_type="audio/mpeg", filename="narr_debug.mp3")
