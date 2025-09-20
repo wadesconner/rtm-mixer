@@ -4,7 +4,7 @@ RTM Mixer - intro BG + narration + outro bed -> polished MP3 using ffmpeg.
 
 - Applies bg_vol ONCE (pre-duck).
 - Voice label uses [vo] (avoids rare binding collisions).
-- Optional --voice_only switch now outputs *only* the narration (no outro).
+- Optional --voice_only switch for narration-only debug.
 - Loudness normalization at the FINAL step only.
 - Verbose logging of filter graphs and ffmpeg output.
 """
@@ -66,6 +66,12 @@ def main():
         print("One or more input files do not exist.", file=sys.stderr)
         sys.exit(2)
 
+    # Helpful runtime print so we SEE the active knobs in logs
+    print(f"=== RTM MIX PARAMS === bg_vol={args.bg_vol} "
+          f"duck_threshold={args.duck_threshold} duck_ratio={args.duck_ratio} "
+          f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} "
+          f"voice_only={args.voice_only}")
+
     if DEBUG:
         ffprobe_info("intro", intro)
         ffprobe_info("narr", narr)
@@ -79,12 +85,13 @@ def main():
         # Voice-only pass-through for quick debugging (no BG, no outro)
         filter1 = "[1:a]aformat=channel_layouts=stereo,aresample=48000,volume=2.0[mix]"
     else:
-        # Apply bg_vol once, duck BG under voice, then mix with explicit weights.
+        # Apply bg_vol once, duck BG under voice, then mix with EQUAL weights
+        # so the bed can’t be starved by low bg_vol + ducking.
         filter1 = f"""
         [0:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.bg_vol}[bgpre];
         [1:a]aformat=channel_layouts=stereo,aresample=48000,volume=1.5[vo];
         [bgpre][vo]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bgduck];
-        [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_vol} 1.0[mix]
+        [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights=1 1[mix]
         """.strip().replace("\n", " ")
 
     print(">>> [filter_complex STEP1]", filter1)
