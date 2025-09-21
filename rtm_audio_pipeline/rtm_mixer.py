@@ -2,13 +2,13 @@
 """
 RTM Mixer - intro BG + narration + outro bed -> polished MP3 using ffmpeg.
 
-Voice-forward defaults:
-- High-pass on voice (120 Hz) to clear rumble / leave room for music.
-- Voice gain (default 2.5x ≈ +8 dB).
-- Explicit amix weights (bed:voice = 0.35:1.0) so voice stays on top.
-- Sidechain ducking still active.
-- Loudness normalization at FINAL step.
-- Voice-only debug mode to sanity-check narration path.
+Voice-forward & robust labels:
+- Unique, explicit labels: [bg_in],[voice_in],[bg_pre],[voice_pre],[bg_duck],[mix]
+- Voice: high-pass 120 Hz, hard-pan to true stereo, strong gain (default 3.0x)
+- amix weights favor voice (bg:voice = 0.30:1.00)
+- Sidechain duck still active (threshold/ratio tunable)
+- Final loudnorm only at the end
+- --voice_only debug outputs narration only
 """
 
 import argparse
@@ -38,29 +38,29 @@ def ffprobe_info(label: str, path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--intro", required=True, help="Intro background (bed)")
-    ap.add_argument("--narr", required=True, help="Narration (dry voice)")
-    ap.add_argument("--outro", required=True, help="Short outro bed (~5s)")
-    ap.add_argument("--out", required=True, help="Output MP3 path")
+    ap.add_argument("--intro", required=True)
+    ap.add_argument("--narr", required=True)
+    ap.add_argument("--outro", required=True)
+    ap.add_argument("--out", required=True)
 
     # Mix controls
-    ap.add_argument("--bg_vol", type=float, default=0.25, help="BG volume multiplier (pre-duck)")
-    ap.add_argument("--duck_threshold", type=float, default=0.02, help="Sidechain threshold")
-    ap.add_argument("--duck_ratio", type=float, default=12.0, help="Sidechain ratio")
-    ap.add_argument("--xfade", type=float, default=1.0, help="Crossfade seconds into outro")
+    ap.add_argument("--bg_vol", type=float, default=0.25)
+    ap.add_argument("--duck_threshold", type=float, default=0.02)
+    ap.add_argument("--duck_ratio", type=float, default=12.0)
+    ap.add_argument("--xfade", type=float, default=1.0)
 
     # Voice-forward knobs
-    ap.add_argument("--voice_gain", type=float, default=2.5, help="Linear gain for voice path before mixing")
-    ap.add_argument("--bg_weight", type=float, default=0.35, help="amix weight for BG")
-    ap.add_argument("--voice_weight", type=float, default=1.0, help="amix weight for Voice")
+    ap.add_argument("--voice_gain", type=float, default=3.0)       # stronger default
+    ap.add_argument("--bg_weight", type=float, default=0.30)       # bed weight
+    ap.add_argument("--voice_weight", type=float, default=1.00)    # voice weight
 
     # Loudness
-    ap.add_argument("--lufs", type=float, default=-16.0, help="Integrated LUFS target")
-    ap.add_argument("--tp", type=float, default=-1.5, help="True peak ceiling dBTP")
-    ap.add_argument("--lra", type=float, default=11.0, help="Loudness range")
+    ap.add_argument("--lufs", type=float, default=-16.0)
+    ap.add_argument("--tp", type=float, default=-1.5)
+    ap.add_argument("--lra", type=float, default=11.0)
 
     # Diagnostics
-    ap.add_argument("--voice_only", action="store_true", help="Output voice only (no BG/outro) for debugging")
+    ap.add_argument("--voice_only", action="store_true")
 
     args = ap.parse_args()
 
@@ -90,16 +90,24 @@ def main():
 
     # ---------- STEP 1: Intro BG + Narration ----------
     if args.voice_only:
-        # Voice-only pass-through (no BG, no outro)
-        filter1 = "[1:a]aformat=channel_layouts=stereo,aresample=48000,highpass=f=120,volume=2.0[mix]"
+        filter1 = (
+            "[1:a]aformat=channel_layouts=mono,aresample=48000[voice_in];"
+            "[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume=2.0[voice_pre];"
+            "[voice_pre]anull[mix]"
+        )
     else:
-        # Voice-forward: BG pre-duck, voice HPF+gain, sidechain duck, amix with explicit weights favoring voice.
-        filter1 = f"""
-        [0:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.bg_vol}[bgpre];
-        [1:a]aformat=channel_layouts=stereo,aresample=48000,highpass=f=120,volume={args.voice_gain}[vo];
-        [bgpre][vo]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bgduck];
-        [bgduck][vo]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]
-        """.strip().replace("\n", " ")
+        # Robust, explicit labels everywhere
+        filter1 = (
+            "[0:a]aformat=channel_layouts=stereo,aresample=48000[bg_in];"
+            f"[bg_in]volume={args.bg_vol}[bg_pre];"
+            "[1:a]aformat=channel_layouts=mono,aresample=48000[voice_in];"
+            # Make the mono voice truly stereo, then enhance it
+            f"[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume={args.voice_gain}[voice_pre];"
+            # Duck the BG using the (loud, HPF’d, stereo) voice as sidechain
+            f"[bg_pre][voice_pre]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bg_duck];"
+            # Mix with explicit weights that favor voice
+            f"[bg_duck][voice_pre]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]"
+        )
 
     print(">>> [filter_complex STEP1]", filter1)
 
@@ -115,18 +123,17 @@ ffmpeg -hide_banner -v verbose -y \
         print("!!! Step 1 failed")
         sys.exit(1)
 
-    # If voice-only, we’re done.
     if args.voice_only:
         core_mix.replace(out)
         print(f"✅ Voice-only debug complete. Wrote: {out}")
         return
 
     # ---------- STEP 2: Crossfade to Outro ----------
-    filter2 = f"""
-    [0:a]aformat=channel_layouts=stereo,aresample=48000[core];
-    [1:a]aformat=channel_layouts=stereo,aresample=48000[out];
-    [core][out]acrossfade=d={args.xfade}:c1=tri:c2=tri[preout]
-    """.strip().replace("\n", " ")
+    filter2 = (
+        "[0:a]aformat=channel_layouts=stereo,aresample=48000[core];"
+        "[1:a]aformat=channel_layouts=stereo,aresample=48000[out];"
+        f"[core][out]acrossfade=d={args.xfade}:c1=tri:c2=tri[preout]"
+    )
     print(">>> [filter_complex STEP2]", filter2)
 
     cmd2 = f"""
