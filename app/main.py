@@ -1,4 +1,4 @@
-# main.py — RTM Mixer API (stable health + diagnostics + hardcoded debug endpoints)
+# main.py — RTM Mixer API (stable health + diagnostics + robust coercion + debug endpoints)
 
 import os
 import shlex
@@ -145,25 +145,37 @@ async def mix(
     if not MIXER.exists():
         raise HTTPException(500, detail=f"Mixer script not found at {MIXER}")
 
-    # prefer query; else form; else default
-    bg_vol = bg_vol if bg_vol is not None else (bg_vol_form if bg_vol_form is not None else 0.25)
-    duck_threshold = duck_threshold if duck_threshold is not None else (duck_threshold_form if duck_threshold_form is not None else 0.02)
-    duck_ratio = duck_ratio if duck_ratio is not None else (duck_ratio_form if duck_ratio_form is not None else 12.0)
-    xfade = xfade if xfade is not None else (xfade_form if xfade_form is not None else 1.0)
-    lufs = lufs if lufs is not None else (lufs_form if lufs_form is not None else -16.0)
-    tp = tp if tp is not None else (tp_form if tp_form is not None else -1.5)
-    lra = lra if lra is not None else (lra_form if lra_form is not None else 11.0)
-
-    # Coerce debug flags from BOTH query and form
-    def _to_int(v, fb):
-        v = v if v is not None else fb
+    # ---------- robust coercion helpers ----------
+    def _num(v, default):
+        # Force to float even if v is weird/annotated; fall back to default
         try:
-            return int(v) if v is not None else 0
+            return float(v)
         except Exception:
-            return 0
+            try:
+                return float(default)
+            except Exception:
+                return 0.0
 
-    voice_only_val = _to_int(voice_only, voice_only_form)
-    step1_only_val = _to_int(step1_only, step1_only_form)
+    def _flag(v, fb):
+        # Prefer query v; else form fb; coerce to 0/1
+        x = v if v is not None else fb
+        try:
+            x = int(x)
+        except Exception:
+            x = 0
+        return 1 if x == 1 else 0
+
+    # prefer query; else form; else default, then HARD-CAST to float
+    bg_vol         = _num(bg_vol if bg_vol is not None else (bg_vol_form if bg_vol_form is not None else 0.25), 0.25)
+    duck_threshold = _num(duck_threshold if duck_threshold is not None else (duck_threshold_form if duck_threshold_form is not None else 0.02), 0.02)
+    duck_ratio     = _num(duck_ratio if duck_ratio is not None else (duck_ratio_form if duck_ratio_form is not None else 12.0), 12.0)
+    xfade          = _num(xfade if xfade is not None else (xfade_form if xfade_form is not None else 1.0), 1.0)
+    lufs           = _num(lufs if lufs is not None else (lufs_form if lufs_form is not None else -16.0), -16.0)
+    tp             = _num(tp if tp is not None else (tp_form if tp_form is not None else -1.5), -1.5)
+    lra            = _num(lra if lra is not None else (lra_form if lra_form is not None else 11.0), 11.0)
+
+    voice_only_val = _flag(voice_only, voice_only_form)
+    step1_only_val = _flag(step1_only, step1_only_form)
 
     workdir = Path(tempfile.mkdtemp(prefix="rtm_mix_"))
     try:
@@ -195,6 +207,7 @@ async def mix(
         except Exception as e:
             print(f"[mix] MIXER sha256: <error: {e}>")
 
+        # Build CLI with sanitized floats/flags
         voice_only_flag = "--voice_only" if voice_only_val == 1 else ""
         step1_only_flag = "--step1_only" if step1_only_val == 1 else ""
 
@@ -204,13 +217,13 @@ async def mix(
           --narr {shlex.quote(str(narr_path))} \
           --outro {shlex.quote(str(outro_path))} \
           --out {shlex.quote(str(out_path))} \
-          --bg_vol {bg_vol} \
-          --duck_threshold {duck_threshold} \
-          --duck_ratio {duck_ratio} \
-          --xfade {xfade} \
-          --lufs {lufs} \
-          --tp {tp} \
-          --lra {lra} \
+          --bg_vol {bg_vol:.6f} \
+          --duck_threshold {duck_threshold:.6f} \
+          --duck_ratio {duck_ratio:.6f} \
+          --xfade {xfade:.6f} \
+          --lufs {lufs:.6f} \
+          --tp {tp:.6f} \
+          --lra {lra:.6f} \
           {voice_only_flag} {step1_only_flag}
         """.strip()
 
@@ -354,6 +367,7 @@ async def generate_and_mix(
     if not ELEVEN_KEY:
         raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
 
+    # ElevenLabs v1 TTS stream → MP3 bytes
     tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
     payload = {
