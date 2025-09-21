@@ -1,4 +1,4 @@
-# main.py — RTM Mixer API (stable health + diagnostics + robust debug flags)
+# main.py — RTM Mixer API (stable health + diagnostics + hardcoded debug endpoints)
 
 import os
 import shlex
@@ -121,7 +121,7 @@ async def mix(
     intro: UploadFile = File(...),      # rtm_intro_bg.mp3 (bed)
     narr: UploadFile = File(...),       # rtm_narration.mp3 (voice)
     outro: UploadFile = File(...),      # rtm_outro_bg.mp3
-    # query params (optional) — plain defaults so /upload -> mix() works
+    # query params (optional)
     bg_vol: Optional[float] = None,
     duck_threshold: Optional[float] = None,
     duck_ratio: Optional[float] = None,
@@ -129,9 +129,9 @@ async def mix(
     lufs: Optional[float] = None,
     tp: Optional[float] = None,
     lra: Optional[float] = None,
-    voice_only: Optional[int] = 0,        # query OR form (see below)
-    step1_only: Optional[int] = 0,        # query OR form (see below)
-    # form fallbacks (HTML form uses these names)
+    voice_only: Optional[int] = 0,
+    step1_only: Optional[int] = 0,
+    # form fallbacks
     bg_vol_form: Optional[float] = Form(None),
     duck_threshold_form: Optional[float] = Form(None),
     duck_ratio_form: Optional[float] = Form(None),
@@ -139,7 +139,6 @@ async def mix(
     lufs_form: Optional[float] = Form(None),
     tp_form: Optional[float] = Form(None),
     lra_form: Optional[float] = Form(None),
-    # diagnostic flags via form too
     voice_only_form: Optional[int] = Form(None),
     step1_only_form: Optional[int] = Form(None),
 ):
@@ -223,6 +222,32 @@ async def mix(
     finally:
         # keep temp dir for debugging
         pass
+
+# -------------------------- Hardcoded debug endpoints --------------------------
+@app.post("/api/mix/voice")
+async def mix_voice_only(
+    intro: UploadFile = File(...),
+    narr: UploadFile = File(...),
+    outro: UploadFile = File(...),
+):
+    # Always force voice-only
+    return await mix(intro=intro, narr=narr, outro=outro, voice_only=1, step1_only=0)
+
+@app.post("/api/mix/step1")
+async def mix_step1_only(
+    intro: UploadFile = File(...),
+    narr: UploadFile = File(...),
+    outro: UploadFile = File(...),
+    bg_vol_form: Optional[float] = Form(0.25),
+    duck_threshold_form: Optional[float] = Form(0.02),
+    duck_ratio_form: Optional[float] = Form(12.0),
+):
+    # Always force Step-1 only (bed+voice), with tunable knobs
+    return await mix(
+        intro=intro, narr=narr, outro=outro,
+        bg_vol=bg_vol_form, duck_threshold=duck_threshold_form, duck_ratio=duck_ratio_form,
+        step1_only=1, voice_only=0
+    )
 
 # -------------------------- /upload (simple browser form) --------------------------
 @app.get("/upload", response_class=HTMLResponse)
@@ -329,7 +354,6 @@ async def generate_and_mix(
     if not ELEVEN_KEY:
         raise HTTPException(500, detail="Missing ELEVENLABS_API_KEY environment variable")
 
-    # ElevenLabs v1 TTS stream → MP3 bytes
     tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     headers = {"xi-api-key": ELEVEN_KEY, "accept": "audio/mpeg", "Content-Type": "application/json"}
     payload = {
