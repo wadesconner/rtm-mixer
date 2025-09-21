@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-RTM Mixer - intro BG + narration + outro bed -> polished MP3 using ffmpeg.
+RTM Mixer — intro BG + narration + outro bed -> polished MP3 using ffmpeg.
 
-Voice-forward & robust labels:
-- Unique, explicit labels: [bg_in],[voice_in],[bg_pre],[voice_pre],[bg_duck],[mix]
-- Voice: high-pass 120 Hz, hard-pan to true stereo, strong gain (default 3.0x)
-- amix weights favor voice (bg:voice = 0.30:1.00)
-- Sidechain duck still active (threshold/ratio tunable)
-- Final loudnorm only at the end
-- --voice_only debug outputs narration only
+Diagnostics & voice-forward:
+- Unique labels to avoid binding conflicts.
+- Voice: true-stereo (pan), high-pass 120 Hz, gain (default 3.0x).
+- amix weights favor voice (BG:Voice = 0.30:1.00) + sidechain duck.
+- FINAL loudnorm only.
+- --voice_only     : output narration only (sanity check).
+- --step1_only     : return Step-1 (bed+voice) BEFORE outro/loudnorm.
 """
 
 import argparse
@@ -50,9 +50,9 @@ def main():
     ap.add_argument("--xfade", type=float, default=1.0)
 
     # Voice-forward knobs
-    ap.add_argument("--voice_gain", type=float, default=3.0)       # stronger default
-    ap.add_argument("--bg_weight", type=float, default=0.30)       # bed weight
-    ap.add_argument("--voice_weight", type=float, default=1.00)    # voice weight
+    ap.add_argument("--voice_gain", type=float, default=3.0)
+    ap.add_argument("--bg_weight", type=float, default=0.30)
+    ap.add_argument("--voice_weight", type=float, default=1.00)
 
     # Loudness
     ap.add_argument("--lufs", type=float, default=-16.0)
@@ -61,6 +61,7 @@ def main():
 
     # Diagnostics
     ap.add_argument("--voice_only", action="store_true")
+    ap.add_argument("--step1_only", action="store_true")
 
     args = ap.parse_args()
 
@@ -77,7 +78,8 @@ def main():
         "=== RTM MIX PARAMS === "
         f"bg_vol={args.bg_vol} duck_threshold={args.duck_threshold} duck_ratio={args.duck_ratio} "
         f"voice_gain={args.voice_gain} weights={args.bg_weight}:{args.voice_weight} "
-        f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} voice_only={args.voice_only}"
+        f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} "
+        f"voice_only={args.voice_only} step1_only={args.step1_only}"
     )
 
     if DEBUG:
@@ -92,20 +94,15 @@ def main():
     if args.voice_only:
         filter1 = (
             "[1:a]aformat=channel_layouts=mono,aresample=48000[voice_in];"
-            "[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume=2.0[voice_pre];"
-            "[voice_pre]anull[mix]"
+            "[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume=2.0[mix]"
         )
     else:
-        # Robust, explicit labels everywhere
         filter1 = (
             "[0:a]aformat=channel_layouts=stereo,aresample=48000[bg_in];"
             f"[bg_in]volume={args.bg_vol}[bg_pre];"
             "[1:a]aformat=channel_layouts=mono,aresample=48000[voice_in];"
-            # Make the mono voice truly stereo, then enhance it
             f"[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume={args.voice_gain}[voice_pre];"
-            # Duck the BG using the (loud, HPF’d, stereo) voice as sidechain
             f"[bg_pre][voice_pre]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bg_duck];"
-            # Mix with explicit weights that favor voice
             f"[bg_duck][voice_pre]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]"
         )
 
@@ -123,9 +120,10 @@ ffmpeg -hide_banner -v verbose -y \
         print("!!! Step 1 failed")
         sys.exit(1)
 
-    if args.voice_only:
+    # Voice-only or Step-1-only exit
+    if args.voice_only or args.step1_only:
         core_mix.replace(out)
-        print(f"✅ Voice-only debug complete. Wrote: {out}")
+        print(f"✅ {'Voice-only' if args.voice_only else 'Step-1-only'} complete. Wrote: {out}")
         return
 
     # ---------- STEP 2: Crossfade to Outro ----------
@@ -174,4 +172,3 @@ ffmpeg -hide_banner -v verbose -y \
 
 if __name__ == "__main__":
     main()
-
