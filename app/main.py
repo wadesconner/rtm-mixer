@@ -105,8 +105,8 @@ async def mix(
     narr_delay: Optional[float] = None,
     outro_gain: Optional[float] = None,
 
-    duck_threshold: Optional[float] = None,
-    duck_ratio: Optional[float] = None,
+    duck_threshold: Optional[float] = None,  # accepted, unused by simplified mixer
+    duck_ratio: Optional[float] = None,      # accepted, unused by simplified mixer
     xfade: Optional[float] = None,
     lufs: Optional[float] = None,
     tp: Optional[float] = None,
@@ -172,8 +172,12 @@ async def mix(
         out_path    = workdir / f"rtm_final_{uuid.uuid4().hex}.mp3"
 
         intro_bytes = await intro.read(); intro_path.write_bytes(intro_bytes)
-        narr_bytes  = await narr.read();  narr_path.write_bytes(narr_bytes)
+        narr_bytes  = await narr.read()
+        if not narr_bytes or len(narr_bytes) < 500:
+            raise HTTPException(500, detail="Narration audio is empty or too short")
+        narr_path.write_bytes(narr_bytes)
         outro_bytes = await outro.read(); outro_path.write_bytes(outro_bytes)
+
         print(f"[mix] wrote intro {intro_path} bytes={len(intro_bytes)}")
         print(f"[mix] wrote narr  {narr_path} bytes={len(narr_bytes)}")
         print(f"[mix] wrote outro {outro_path} bytes={len(outro_bytes)}")
@@ -214,7 +218,7 @@ async def mix(
     finally:
         pass
 
-# Debug endpoints (kept)
+# -------------------------- Hardcoded debug endpoints --------------------------
 @app.post("/api/mix/voice")
 async def mix_voice_only(intro: UploadFile = File(...), narr: UploadFile = File(...), outro: UploadFile = File(...)):
     return await mix(intro=intro, narr=narr, outro=outro, voice_only=1, step1_only=0)
@@ -238,6 +242,7 @@ async def mix_step1_only(
         step1_only=1, voice_only=0
     )
 
+# -------------------------- Simple upload form --------------------------
 @app.get("/upload", response_class=HTMLResponse)
 def upload_form():
     return """
@@ -285,7 +290,7 @@ async def upload_and_mix(
         voice_only=0, step1_only=0,
     )
 
-# ---------- /generate (unchanged except form gets final mix knobs) ----------
+# -------------------------- ElevenLabs generate --------------------------
 ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
 @app.get("/generate", response_class=HTMLResponse)
