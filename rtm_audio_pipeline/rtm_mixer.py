@@ -18,6 +18,8 @@ Step 3:
 Diagnostics:
 - --voice_only : output processed voice only (stereo, HPF, gain, delay).
 - --step1_only : write Step-1 (bed+voice), stop before outro/loudnorm.
+
+Note: --duck_threshold and --duck_ratio are accepted for backward-compat but unused.
 """
 
 import argparse
@@ -74,6 +76,10 @@ def main():
     ap.add_argument("--voice_only", action="store_true")
     ap.add_argument("--step1_only", action="store_true")
 
+    # Back-compat (accepted, unused in this simplified graph)
+    ap.add_argument("--duck_threshold", type=float, default=0.02)
+    ap.add_argument("--duck_ratio", type=float, default=12.0)
+
     args = ap.parse_args()
 
     intro = Path(args.intro)
@@ -105,18 +111,15 @@ def main():
     delay_ms = max(0, int(round(args.narr_delay * 1000)))
     if args.voice_only:
         filter1 = (
-            # Process voice only
             f"[1:a]aresample=48000,aformat=channel_layouts=stereo,"
             f"highpass=f=120,volume={args.voice_gain},adelay={delay_ms}|{delay_ms}[voice];"
             "[voice]anull[mix]"
         )
     else:
         filter1 = (
-            # Upmix both to stereo @ 48k
             f"[0:a]aresample=48000,aformat=channel_layouts=stereo,volume={args.bg_vol}[bg];"
             f"[1:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume={args.voice_gain},"
             f"adelay={delay_ms}|{delay_ms}[voice];"
-            # Plain amix with explicit weights favoring voice
             f"[bg][voice]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]"
         )
 
