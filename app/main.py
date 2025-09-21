@@ -1,4 +1,4 @@
-# main.py — RTM Mixer API (stable + health + diagnostics)
+# main.py — RTM Mixer API (stable health + diagnostics)
 
 import os
 import shlex
@@ -15,19 +15,26 @@ from typing import Optional
 import httpx
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 app = FastAPI(title="RTM Mixer API")
 
 # -------------------------- Health Endpoints --------------------------
 @app.get("/", response_class=PlainTextResponse)
-def root():
-    # Render can use "/" as the health check path
+def root_get():
     return "ok"
 
+@app.head("/", response_class=PlainTextResponse)
+def root_head():
+    return Response(content=b"", media_type="text/plain")
+
 @app.get("/healthz", response_class=PlainTextResponse)
-def healthz():
+def healthz_get():
     return "ok"
+
+@app.head("/healthz", response_class=PlainTextResponse)
+def healthz_head():
+    return Response(content=b"", media_type="text/plain")
 
 # -------------------------- Paths --------------------------
 PIPELINE_DIR = Path(__file__).resolve().parent.parent / "rtm_audio_pipeline"
