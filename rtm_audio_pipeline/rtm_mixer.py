@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-RTM Mixer — simplified, voice-forward & robust
+RTM Mixer — voice-forward, timing controls, robust
 
 Step 1 (core mix):
 - Force both inputs to 48k stereo.
-- Voice: high-pass @120 Hz + gain (default 3.0x).
-- Plain amix with strong voice weight (BG:Voice = 0.20:1.00).
+- Optional voice preroll delay (narr_delay sec) so the bed plays before Clyde enters.
+- Voice: high-pass @120 Hz + gain (voice_gain).
+- Plain amix with explicit weights (bg_weight : voice_weight).
+- Bed multiplies by bg_vol before mix.
 
 Step 2:
-- acrossfade to outro.
+- acrossfade to outro with adjustable gain (outro_gain) and time (xfade).
 
 Step 3:
-- loudnorm at the very end.
+- loudnorm at the very end (I/TP/LRA).
 
 Diagnostics:
-- --voice_only : output voice only (stereo, HPF, gain).
+- --voice_only : output processed voice only (stereo, HPF, gain, delay).
 - --step1_only : write Step-1 (bed+voice), stop before outro/loudnorm.
 """
 
@@ -50,16 +52,18 @@ def main():
     ap.add_argument("--outro", required=True)
     ap.add_argument("--out", required=True)
 
-    # Mix knobs
-    ap.add_argument("--bg_vol", type=float, default=0.25)
-    ap.add_argument("--duck_threshold", type=float, default=0.02)  # kept for parity; not used in this simplified graph
-    ap.add_argument("--duck_ratio", type=float, default=12.0)      # kept for parity; not used in this simplified graph
-    ap.add_argument("--xfade", type=float, default=1.0)
+    # Balance/levels
+    ap.add_argument("--bg_vol", type=float, default=0.25)          # overall bed multiplier
+    ap.add_argument("--voice_gain", type=float, default=3.0)       # post-HPF gain on voice
+    ap.add_argument("--bg_weight", type=float, default=0.35)       # relative weight in amix
+    ap.add_argument("--voice_weight", type=float, default=1.00)    # relative weight in amix
 
-    # Voice-forward controls
-    ap.add_argument("--voice_gain", type=float, default=3.0)
-    ap.add_argument("--bg_weight", type=float, default=0.20)
-    ap.add_argument("--voice_weight", type=float, default=1.00)
+    # Timing
+    ap.add_argument("--narr_delay", type=float, default=0.6)       # seconds to delay voice vs bed
+    ap.add_argument("--xfade", type=float, default=1.2)            # seconds of acrossfade to outro
+
+    # Outro level
+    ap.add_argument("--outro_gain", type=float, default=0.9)
 
     # Loudness
     ap.add_argument("--lufs", type=float, default=-16.0)
@@ -84,7 +88,8 @@ def main():
     print(
         "=== RTM MIX PARAMS === "
         f"bg_vol={args.bg_vol} voice_gain={args.voice_gain} weights={args.bg_weight}:{args.voice_weight} "
-        f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} "
+        f"narr_delay={args.narr_delay}s xfade={args.xfade}s outro_gain={args.outro_gain} "
+        f"lufs={args.lufs} tp={args.tp} lra={args.lra} "
         f"voice_only={args.voice_only} step1_only={args.step1_only}"
     )
 
@@ -96,21 +101,24 @@ def main():
     core_mix = out.with_suffix(".core_mix.mp3")
     core_plus_outro = out.with_suffix(".core_plus_outro.mp3")
 
-    # ---------- STEP 1: Intro BG + Narration (simple, robust) ----------
+    # ---------- STEP 1: Intro BG + Narration (with optional voice delay) ----------
+    delay_ms = max(0, int(round(args.narr_delay * 1000)))
     if args.voice_only:
         filter1 = (
-            # Upmix to stereo, HPF, and gain the voice
-            "[1:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume={vg}[voice];"
+            # Process voice only
+            f"[1:a]aresample=48000,aformat=channel_layouts=stereo,"
+            f"highpass=f=120,volume={args.voice_gain},adelay={delay_ms}|{delay_ms}[voice];"
             "[voice]anull[mix]"
-        ).format(vg=args.voice_gain)
+        )
     else:
         filter1 = (
             # Upmix both to stereo @ 48k
-            "[0:a]aresample=48000,aformat=channel_layouts=stereo,volume={bgv}[bg];"
-            "[1:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume={vg}[voice];"
+            f"[0:a]aresample=48000,aformat=channel_layouts=stereo,volume={args.bg_vol}[bg];"
+            f"[1:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume={args.voice_gain},"
+            f"adelay={delay_ms}|{delay_ms}[voice];"
             # Plain amix with explicit weights favoring voice
-            "[bg][voice]amix=inputs=2:duration=shortest:dropout_transition=0:weights={bw} {vw}[mix]"
-        ).format(bgv=args.bg_vol, vg=args.voice_gain, bw=args.bg_weight, vw=args.voice_weight)
+            f"[bg][voice]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]"
+        )
 
     print(">>> [filter_complex STEP1]", filter1)
 
@@ -131,10 +139,10 @@ ffmpeg -hide_banner -v verbose -y \
         print(f"✅ {'Voice-only' if args.voice_only else 'Step-1-only'} complete. Wrote: {out}")
         return
 
-    # ---------- STEP 2: Crossfade to Outro ----------
+    # ---------- STEP 2: Crossfade to Outro (with outro_gain) ----------
     filter2 = (
         "[0:a]aformat=channel_layouts=stereo,aresample=48000[core];"
-        "[1:a]aformat=channel_layouts=stereo,aresample=48000[out];"
+        f"[1:a]aformat=channel_layouts=stereo,aresample=48000,volume={args.outro_gain}[out];"
         f"[core][out]acrossfade=d={args.xfade}:c1=tri:c2=tri[preout]"
     )
     print(">>> [filter_complex STEP2]", filter2)
