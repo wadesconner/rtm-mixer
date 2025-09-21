@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-RTM Mixer — intro BG + narration + outro bed -> polished MP3 using ffmpeg.
+RTM Mixer — simplified, voice-forward & robust
 
-Diagnostics & voice-forward:
-- Unique labels to avoid binding conflicts.
-- Voice: true-stereo (pan), high-pass 120 Hz, gain (default 3.0x).
-- amix weights favor voice (BG:Voice = 0.30:1.00) + sidechain duck.
-- FINAL loudnorm only.
-- --voice_only     : output narration only (sanity check).
-- --step1_only     : return Step-1 (bed+voice) BEFORE outro/loudnorm.
+Step 1 (core mix):
+- Force both inputs to 48k stereo.
+- Voice: high-pass @120 Hz + gain (default 3.0x).
+- Plain amix with strong voice weight (BG:Voice = 0.20:1.00).
+
+Step 2:
+- acrossfade to outro.
+
+Step 3:
+- loudnorm at the very end.
+
+Diagnostics:
+- --voice_only : output voice only (stereo, HPF, gain).
+- --step1_only : write Step-1 (bed+voice), stop before outro/loudnorm.
 """
 
 import argparse
@@ -43,15 +50,15 @@ def main():
     ap.add_argument("--outro", required=True)
     ap.add_argument("--out", required=True)
 
-    # Mix controls
+    # Mix knobs
     ap.add_argument("--bg_vol", type=float, default=0.25)
-    ap.add_argument("--duck_threshold", type=float, default=0.02)
-    ap.add_argument("--duck_ratio", type=float, default=12.0)
+    ap.add_argument("--duck_threshold", type=float, default=0.02)  # kept for parity; not used in this simplified graph
+    ap.add_argument("--duck_ratio", type=float, default=12.0)      # kept for parity; not used in this simplified graph
     ap.add_argument("--xfade", type=float, default=1.0)
 
-    # Voice-forward knobs
+    # Voice-forward controls
     ap.add_argument("--voice_gain", type=float, default=3.0)
-    ap.add_argument("--bg_weight", type=float, default=0.30)
+    ap.add_argument("--bg_weight", type=float, default=0.20)
     ap.add_argument("--voice_weight", type=float, default=1.00)
 
     # Loudness
@@ -76,8 +83,7 @@ def main():
 
     print(
         "=== RTM MIX PARAMS === "
-        f"bg_vol={args.bg_vol} duck_threshold={args.duck_threshold} duck_ratio={args.duck_ratio} "
-        f"voice_gain={args.voice_gain} weights={args.bg_weight}:{args.voice_weight} "
+        f"bg_vol={args.bg_vol} voice_gain={args.voice_gain} weights={args.bg_weight}:{args.voice_weight} "
         f"xfade={args.xfade} lufs={args.lufs} tp={args.tp} lra={args.lra} "
         f"voice_only={args.voice_only} step1_only={args.step1_only}"
     )
@@ -90,21 +96,21 @@ def main():
     core_mix = out.with_suffix(".core_mix.mp3")
     core_plus_outro = out.with_suffix(".core_plus_outro.mp3")
 
-    # ---------- STEP 1: Intro BG + Narration ----------
+    # ---------- STEP 1: Intro BG + Narration (simple, robust) ----------
     if args.voice_only:
         filter1 = (
-            "[1:a]aformat=channel_layouts=mono,aresample=48000[voice_in];"
-            "[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume=2.0[mix]"
-        )
+            # Upmix to stereo, HPF, and gain the voice
+            "[1:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume={vg}[voice];"
+            "[voice]anull[mix]"
+        ).format(vg=args.voice_gain)
     else:
         filter1 = (
-            "[0:a]aformat=channel_layouts=stereo,aresample=48000[bg_in];"
-            f"[bg_in]volume={args.bg_vol}[bg_pre];"
-            "[1:a]aformat=channel_layouts=mono,aresample=48000[voice_in];"
-            f"[voice_in]pan=stereo|c0=c0|c1=c0,highpass=f=120,volume={args.voice_gain}[voice_pre];"
-            f"[bg_pre][voice_pre]sidechaincompress=threshold={args.duck_threshold}:ratio={args.duck_ratio}:attack=5:release=300[bg_duck];"
-            f"[bg_duck][voice_pre]amix=inputs=2:duration=shortest:dropout_transition=0:weights={args.bg_weight} {args.voice_weight}[mix]"
-        )
+            # Upmix both to stereo @ 48k
+            "[0:a]aresample=48000,aformat=channel_layouts=stereo,volume={bgv}[bg];"
+            "[1:a]aresample=48000,aformat=channel_layouts=stereo,highpass=f=120,volume={vg}[voice];"
+            # Plain amix with explicit weights favoring voice
+            "[bg][voice]amix=inputs=2:duration=shortest:dropout_transition=0:weights={bw} {vw}[mix]"
+        ).format(bgv=args.bg_vol, vg=args.voice_gain, bw=args.bg_weight, vw=args.voice_weight)
 
     print(">>> [filter_complex STEP1]", filter1)
 
@@ -120,7 +126,6 @@ ffmpeg -hide_banner -v verbose -y \
         print("!!! Step 1 failed")
         sys.exit(1)
 
-    # Voice-only or Step-1-only exit
     if args.voice_only or args.step1_only:
         core_mix.replace(out)
         print(f"✅ {'Voice-only' if args.voice_only else 'Step-1-only'} complete. Wrote: {out}")
