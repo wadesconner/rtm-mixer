@@ -18,3 +18,4 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
 # inside your Dockerfile
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
+RUN apk add --no-cache ffmpeg
