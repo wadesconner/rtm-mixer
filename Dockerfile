@@ -14,3 +14,7 @@ COPY rtm_audio_pipeline ./rtm_audio_pipeline
 
 EXPOSE 10000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
+
+# inside your Dockerfile
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
